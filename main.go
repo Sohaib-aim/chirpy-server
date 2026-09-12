@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"sort"
 
 	"github.com/Sohaib-aim/chirpy-server/internal/auth"
 	"github.com/Sohaib-aim/chirpy-server/internal/database"
@@ -256,25 +257,56 @@ func (cfg *apiConfig) retrieveChirps(w http.ResponseWriter, r *http.Request){
     UserID    uuid.UUID `json:"user_id"`
 	}
 
-	chirps, err := cfg.dbQueries.GetAllChirps(r.Context())
+	authorID := r.URL.Query().Get("author_id")
 
-	if err != nil{
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("error getting chirps"))
-		return
+	var chirps []database.Chirp
+	var err error
+
+	if authorID == ""{
+		chirps, err = cfg.dbQueries.GetAllChirps(r.Context())
+
+		if err != nil{
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("error getting chirps"))
+			return
+		}
+	} else{
+		userID, err := uuid.Parse(authorID)
+		if err != nil{
+			w.WriteHeader(400)
+			return
+		}
+		chirps, err = cfg.dbQueries.GetChirpsByAuthor(r.Context(), userID)
+		if err != nil{
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 	}
+
+	sortOrder := r.URL.Query().Get("sort")
+
+	if sortOrder == ""{
+		sortOrder = "asc"
+	}
+
+	sort.Slice(chirps, func(i, j int) bool{
+		if sortOrder == "desc"{
+			return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+		}
+		return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+	})
 
 	responses := make([]chirpResponse, 0, len(chirps))
 
-    for _, chirp := range chirps {
-        responses = append(responses, chirpResponse{
-            ID:        chirp.ID,
-            CreatedAt: chirp.CreatedAt,
-            UpdatedAt: chirp.UpdatedAt,
-            Body:      chirp.Body,
-            UserID:    chirp.UserID,
-        })
-    }
+	for _, chirp := range chirps {
+    	responses = append(responses, chirpResponse{
+        	ID:        chirp.ID,
+        	CreatedAt: chirp.CreatedAt,
+        	UpdatedAt: chirp.UpdatedAt,
+        	Body:      chirp.Body,
+        	UserID:    chirp.UserID,
+    	})
+	}
 
 	res, _ := json.Marshal(responses)
 	w.WriteHeader(200)
