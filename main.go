@@ -320,7 +320,6 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request){
 	type parameters struct{
 		Password string `json:"password"`
 		Email string `json:"email"`
-		ExpiresInSeconds int `json:"expires_in_seconds"`
 	}
 
 	type errorResponse struct{
@@ -333,6 +332,7 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request){
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
 	Token string        `json:"token"`
+	RefreshToken string `json:"refresh_token"`
 	}
 
 	var params parameters
@@ -346,16 +346,6 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request){
 		data, _ := json.Marshal(errors)
 		w.Write(data)
 		return
-	}
-
-	expiresIn := time.Hour
-
-	if params.ExpiresInSeconds > 0{
-		expiresIn = time.Duration(params.ExpiresInSeconds) * time.Second
-	}
-
-	if expiresIn > time.Hour{
-		expiresIn = time.Hour
 	}
 
 	user, err := cfg.dbQueries.GetUserByEmail(r.Context(), params.Email)
@@ -388,11 +378,23 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request){
 		return
 	}
 
-	tokenString, err := auth.MakeJWT(user.ID, cfg.token_secret, expiresIn)
+	tokenString, err := auth.MakeJWT(user.ID, cfg.token_secret, time.Hour)
 	if err != nil{
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+
+	refresh_token := auth.MakeRefreshToken()
+	refreshExpiresAt := time.Now().Add(60 * 24 * time.Hour)
+	now := time.Now()
+
+	_, err = cfg.dbQueries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token: refresh_token,
+		CreatedAt: now,
+		UpdatedAt: now,
+		UserID: user.ID,
+		ExpiresAt: refreshExpiresAt,
+	})
 
 	userRes := userResponse{
 		ID: user.ID,
@@ -400,12 +402,89 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request){
 		UpdatedAt: user.UpdatedAt,
 		Email: user.Email,
 		Token: tokenString,
+		RefreshToken: refresh_token,
 	}
 
 	data, _ := json.Marshal(userRes)
 	w.Header().Set("Content-Type","application/json")
 	w.WriteHeader(200)
 	w.Write(data)
+}
+
+func (cfg *apiConfig) refreshToken(w http.ResponseWriter, r *http.Request){
+
+	type errorResponse struct{
+		Error string `json:"error"`
+	}
+
+	type userResponse struct{
+		Token string `json:"token"`
+	}
+
+	bearer_token, err := auth.GetBearerToken(r.Header)
+	if err != nil{
+		errors := errorResponse{
+			Error: "error getting the refresh bearer token",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(data)
+		return
+	}
+	user, err := cfg.dbQueries.GetUserFromRefreshToken(r.Context(), bearer_token)
+	if err != nil{
+		errors := errorResponse{
+			Error: "user with this refresh token does not exist",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(data)
+		return
+	}
+	token, err := auth.MakeJWT(user.UserID, cfg.token_secret, time.Hour)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	tokenRes := userResponse{
+		Token: token,
+	}
+
+	data, _ := json.Marshal(tokenRes)
+	w.Header().Set("Content-Type","application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+
+}
+
+
+func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request){
+	type errorResponse struct{
+		Error string `json:"error"`
+	}
+
+	bearer_token, err := auth.GetBearerToken(r.Header)
+	if err != nil{
+		errors := errorResponse{
+			Error: "error getting the refresh bearer token",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(data)
+		return
+	}
+
+	err = cfg.dbQueries.RevokeRefreshToken(r.Context(), bearer_token)
+	if err != nil{
+		errors := errorResponse{
+			Error: "error revoking the refresh token",
+		}
+		data, _ := json.Marshal(errors)
+		w.Write(data)
+		return	
+	}
+	w.WriteHeader(204)
 }
 
 func main(){
@@ -434,6 +513,8 @@ func main(){
 	mux.HandleFunc("GET /api/chirps", apiCfg.retrieveChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpId}", apiCfg.getChirp)
 	mux.HandleFunc("POST /api/login", apiCfg.loginUser)
+	mux.HandleFunc("POST /api/refresh", apiCfg.refreshToken)
+	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
 
 	server := &http.Server{
 		Handler: mux,
