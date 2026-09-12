@@ -7,6 +7,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/google/uuid"
 )
@@ -33,6 +34,20 @@ func (q *Queries) CreateChirp(ctx context.Context, arg CreateChirpParams) (Chirp
 		&i.UserID,
 	)
 	return i, err
+}
+
+const deleteChirp = `-- name: DeleteChirp :execresult
+DELETE FROM chirps
+WHERE id = $1 AND user_id = $2
+`
+
+type DeleteChirpParams struct {
+	ID     uuid.UUID
+	UserID uuid.UUID
+}
+
+func (q *Queries) DeleteChirp(ctx context.Context, arg DeleteChirpParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, deleteChirp, arg.ID, arg.UserID)
 }
 
 const getAllChirps = `-- name: GetAllChirps :many

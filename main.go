@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Sohaib-aim/chirpy-server/internal/database"
 	"github.com/Sohaib-aim/chirpy-server/internal/auth"
+	"github.com/Sohaib-aim/chirpy-server/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -30,6 +30,7 @@ type apiConfig struct{
 	dbQueries *database.Queries
 	platform string
 	token_secret string
+	polka_key string
 }	
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler{
@@ -181,6 +182,7 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request){
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	IsChirpyRed bool `json:"is_chirpy_red"`
 	}
 
 	var params parameters
@@ -231,6 +233,7 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request){
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email: user.Email,
+		IsChirpyRed: user.IsChirpyRed.Bool,
 	}
 
 	data, err := json.Marshal(userRes)
@@ -333,6 +336,7 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request){
 	Email     string    `json:"email"`
 	Token string        `json:"token"`
 	RefreshToken string `json:"refresh_token"`
+	IsChirpyRed bool `json:"is_chirpy_red"`
 	}
 
 	var params parameters
@@ -403,6 +407,7 @@ func (cfg *apiConfig) loginUser(w http.ResponseWriter, r *http.Request){
 		Email: user.Email,
 		Token: tokenString,
 		RefreshToken: refresh_token,
+		IsChirpyRed: user.IsChirpyRed.Bool,
 	}
 
 	data, _ := json.Marshal(userRes)
@@ -458,7 +463,6 @@ func (cfg *apiConfig) refreshToken(w http.ResponseWriter, r *http.Request){
 
 }
 
-
 func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request){
 	type errorResponse struct{
 		Error string `json:"error"`
@@ -487,11 +491,244 @@ func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(204)
 }
 
+func (cfg *apiConfig) updateCredentials(w http.ResponseWriter, r *http.Request){
+
+	type parameters struct{
+		Password string `json:"password"`
+		Email string `json:"email"`
+	}
+
+	type errorResponse struct{
+		Error string `json:"error"`
+	}
+
+	type userResponse struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+	IsChirpyRed bool `json:"is_chirpy_red"`
+	}
+
+	bearer_token, err := auth.GetBearerToken(r.Header)
+	if err != nil{
+		errors := errorResponse{
+			Error: "error getting the refresh bearer token",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(data)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(bearer_token, cfg.token_secret)
+	if err != nil{
+		errors := errorResponse{
+			Error: "error getting the refresh bearer token",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(data)
+		return
+	}
+
+	var params parameters
+
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&params); err != nil{
+		errors := errorResponse{
+			Error: "error decoding the response",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(data)
+		return
+	}
+
+	hashed_passwd, err := auth.HashPassword(params.Password)
+	if err != nil{
+		errors := errorResponse{
+			Error: "error hashing the password",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(data)
+		return
+	}
+	
+	user, err := cfg.dbQueries.UpdateUserCredentials(r.Context(), database.UpdateUserCredentialsParams{
+		Email: params.Email, 
+		HashedPassword: hashed_passwd,
+		ID: userID,
+	})
+	if err != nil{
+		errors := errorResponse{
+			Error: "error updating the credentials",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(data)
+		return
+	}
+
+	userRes := userResponse{
+		ID: user.ID,
+		Email: user.Email,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		IsChirpyRed: user.IsChirpyRed.Bool,
+	}
+
+	data, _ := json.Marshal(userRes)
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) chirpDelete(w http.ResponseWriter, r *http.Request){
+
+	type errorResponse struct{
+		Error string `json:"error"`
+	}
+
+	bearer_token, err := auth.GetBearerToken(r.Header)
+	if err != nil{
+		errors := errorResponse{
+			Error: "error getting access token",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(data)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(bearer_token, cfg.token_secret)
+	if err != nil{
+		errors := errorResponse{
+			Error: "invalid access token",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(403)
+		w.Write(data)
+		return
+	}
+	
+	chirpID := r.PathValue("chirpId")
+	parsedID, err := uuid.Parse(chirpID)
+	if err != nil {
+    	errors := errorResponse{
+        	Error: "invalid chirp ID",
+    	}
+    	data, _ := json.Marshal(errors)
+    	w.WriteHeader(http.StatusBadRequest)
+    	w.Write(data)
+    	return
+	}
+
+	result, err := cfg.dbQueries.DeleteChirp(r.Context(), database.DeleteChirpParams{ID: parsedID, UserID: userID})
+	if err != nil{
+		errors := errorResponse{
+			Error: "error deleting the chirp",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(403)
+		w.Write(data)
+		return
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil{
+		w.WriteHeader(403)
+		return
+	}
+
+	if rows == 0{
+		w.WriteHeader(403)
+		return
+	}
+
+	w.WriteHeader(204)
+}
+
+func (cfg *apiConfig) updateChirpyRed(w http.ResponseWriter, r *http.Request){
+	
+	type errorResponse struct{
+		Error string `json:"error"`
+	}
+
+	type data struct{
+		UserID string `json:"user_id"`
+	}
+
+	type parameters struct{
+		Event string `json:"event"`
+		Data data `json:"data"`
+	}
+
+	apiKey, err := auth.GetApiKey(r.Header)
+	if err != nil{
+		errors := errorResponse{
+			Error: "error getting the api key",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(data)
+		return
+	}
+
+	if apiKey != cfg.polka_key{
+		w.WriteHeader(401)
+		return
+	}
+
+	var params parameters
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&params); err != nil{
+		errors := errorResponse{
+			Error: "error decoding the body",
+		}
+		data, _ := json.Marshal(errors)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(data)
+		return
+	}
+
+	if params.Event != "user.upgraded"{
+		w.WriteHeader(204)
+		return
+	}
+
+	parsed_id, _ := uuid.Parse(params.Data.UserID)
+
+	rows, err := cfg.dbQueries.UpdateChirpyRed(r.Context(), parsed_id)
+	if err != nil{
+		errors := errorResponse{
+			Error: "error updating the user plan",
+		}
+		data, err := json.Marshal(errors)
+		if err != nil {
+    		w.WriteHeader(http.StatusBadRequest)
+    		return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write(data)
+		return
+	}
+
+	if rows == 0{
+		w.WriteHeader(404)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+
+}
+
 func main(){
 	godotenv.Load()
 	db_url := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 	token_secret := os.Getenv("TOKEN_SECRET")
+	polka_key := os.Getenv("POLKA_KEY")
 	db, err := sql.Open("postgres", db_url)
 	if err != nil{
 		log.Fatal("error opening database connection")
@@ -502,6 +739,7 @@ func main(){
 		dbQueries: dbQueries,
 		platform: platform,
 		token_secret: token_secret,
+		polka_key: polka_key,
 	}
 	fileserver := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(fileserver))
@@ -515,6 +753,9 @@ func main(){
 	mux.HandleFunc("POST /api/login", apiCfg.loginUser)
 	mux.HandleFunc("POST /api/refresh", apiCfg.refreshToken)
 	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
+	mux.HandleFunc("PUT /api/users", apiCfg.updateCredentials)
+	mux.HandleFunc("DELETE /api/chirps/{chirpId}", apiCfg.chirpDelete)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.updateChirpyRed)
 
 	server := &http.Server{
 		Handler: mux,
